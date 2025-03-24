@@ -1,0 +1,15 @@
+{
+    "name": "google-play-scraper-project",
+    "version": "1.0.0",
+    "description": "Scrape Google Play Store apps",
+    "main": "app-scraper.js",
+    "type": "module",
+    "scripts": {
+        "start": "node app-scraper.js"
+    },
+    "dependencies": {
+        "fs": "^0.0.1-security",
+        "google-play-scraper": "^10.0.1",
+        "xlsx": "^0.18.5"
+    }
+}
