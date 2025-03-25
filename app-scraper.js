@@ -2,19 +2,22 @@ import gplay from 'google-play-scraper';
 import * as XLSX from 'xlsx';
 import fs from 'fs';
 
-// Target update date
-const targetDate = new Date('2025-01-01');
+// Calculate date range for past three months
+const endDate = new Date(); // Current date
+const startDate = new Date();
+startDate.setMonth(endDate.getMonth() - 3); // 3 months ago
 
 // Configuration options
 const CONFIG = {
-    throttle: 3, // Requests per second (lower for reliability)
-    batchSize: 500, // How many apps to fetch per category/collection
-    delayBetweenBatches: 10000, // 10 seconds between batches
-    maxRetries: 3, // Retry failed requests
-    saveProgressEvery: 50, // Save progress after every N apps
-    outputFile: 'google_play_apps_jan_1_2025.xlsx',
-    progressFile: 'collected_apps.json',
-    countryCodes: ['us'] // 
+    throttle: 2, // Reduced to avoid rate limits
+    batchSize: 2500, // Batch size for controlled scraping
+    delayBetweenBatches: 15000, // Delay between batches
+    maxRetries: 3,
+    saveProgressEvery: 50,
+    outputFile: 'google_play_apps_past_three_months.xlsx',
+    progressFile: 'collected_apps_past_three_months.json',
+    maxInstalls: 100000, // Optional: limit on number of installs
+    countryCodes: ['us'] 
 };
 
 // All available categories from constants.js
@@ -35,21 +38,12 @@ const categories = [
     'GAME_SPORTS', 'GAME_STRATEGY', 'GAME_TRIVIA', 'GAME_WORD', 'FAMILY'
 ];
 
-// All available collections
-const collections = [
-    'TOP_FREE', 'TOP_PAID', 'GROSSING'
-];
-
-// Function to check if a date is January 1, 2025
-function isDateJan1st2025(timestamp) {
+// Function to check if an app's update is within the target date range
+function isWithinTargetDateRange(timestamp) {
     if (!timestamp) return false;
     
     const date = new Date(timestamp);
-    const year = date.getFullYear();
-    const month = date.getMonth(); // 0 for January
-    const day = date.getDate();
-    
-    return year === 2025 && month === 0 && day === 1;
+    return date >= startDate && date <= endDate;
 }
 
 // Improved function to retry on failure
@@ -63,7 +57,6 @@ async function retryOperation(operation, retries = CONFIG.maxRetries) {
             console.log(`Attempt ${attempt + 1} failed. ${retries - attempt - 1} retries left.`);
             lastError = error;
             
-            // Wait longer between retries
             const delayMs = Math.pow(2, attempt) * 1000 + Math.random() * 1000;
             await new Promise(resolve => setTimeout(resolve, delayMs));
         }
@@ -82,13 +75,19 @@ function loadProgress() {
     } catch (error) {
         console.error('Error loading progress file:', error.message);
     }
-    return [];
+    return {
+        collectedApps: [],
+        processedPages: {}
+    };
 }
 
 // Save progress to file
-function saveProgress(collectedApps) {
+function saveProgress(collectedApps, processedPages = {}) {
     try {
-        fs.writeFileSync(CONFIG.progressFile, JSON.stringify(collectedApps, null, 2));
+        fs.writeFileSync(CONFIG.progressFile, JSON.stringify({
+            collectedApps,
+            processedPages
+        }, null, 2));
         console.log(`Progress saved: ${collectedApps.length} apps collected so far`);
     } catch (error) {
         console.error('Error saving progress:', error.message);
@@ -97,11 +96,15 @@ function saveProgress(collectedApps) {
 
 // Main function
 async function main() {
-    let collectedApps = loadProgress();
+    console.log(`Scraping timeframe: ${startDate.toISOString()} to ${endDate.toISOString()}`);
+    
+    const progress = loadProgress();
+    let collectedApps = progress.collectedApps;
+    const processedPages = progress.processedPages || {};
     const processedAppIds = new Set(collectedApps.map(app => app.appId));
     let totalAppsProcessed = 0;
     
-    console.log(`Starting collection for apps updated on January 1, 2025...`);
+    console.log(`Starting collection for apps updated in past three months...`);
     console.log(`Loaded ${collectedApps.length} apps from previous progress`);
     
     // Process each country
@@ -112,27 +115,30 @@ async function main() {
         for (const category of categories) {
             console.log(`\n--- Category: ${category} ---`);
             
-            // Process each collection
-            for (const collection of collections) {
-                console.log(`Collection: ${collection}`);
-                
+            // Initialize page tracking for this specific combination
+            const progressKey = `${country}_${category}`;
+            let page = processedPages[progressKey] || 0;
+            let hasMore = true;
+            
+            while (hasMore) {
                 try {
-                    // Fetch apps for this category/collection
-                    const apps = await retryOperation(() => gplay.list({
+                    // Fetch apps with search instead of collections
+                    const apps = await retryOperation(() => gplay.search({
+                        term: '', // Empty term to get all apps
                         category: category,
-                        collection: collection,
-                        lang: 'en',
                         country: country,
                         num: CONFIG.batchSize,
+                        start: page * CONFIG.batchSize,
                         fullDetail: true,
                         throttle: CONFIG.throttle
                     }));
                     
-                    console.log(`Retrieved ${apps.length} apps, checking for January 1, 2025 updates...`);
+                    console.log(`Page ${page + 1}: Retrieved ${apps.length} apps`);
                     
                     let matchCount = 0;
+                    let reachedOldApps = false;
                     
-                    // Process apps and filter for January 1, 2025 updates
+                    // Process apps and filter for date range
                     for (const app of apps) {
                         totalAppsProcessed++;
                         
@@ -141,52 +147,69 @@ async function main() {
                             continue;
                         }
                         
-                        // Check update date
-                        if (app.updated && isDateJan1st2025(app.updated)) {
-                            matchCount++;
-                            processedAppIds.add(app.appId);
+                        // Check if app is too old
+                        if (app.updated && new Date(app.updated) < startDate) {
+                            reachedOldApps = true;
+                            break;
+                        }
+                        
+                        // Check update date range
+                        if (app.updated && isWithinTargetDateRange(app.updated)) {
+                            // Parse installs and convert to number
+                            const installCount = parseInt(app.installs.replace(/[^0-9]/g, ''), 10) || 0;
                             
-                            const updateDate = new Date(app.updated);
-                            
-                            collectedApps.push({
-                                title: app.title || '',
-                                appId: app.appId || '',
-                                installs: app.installs || '',
-                                scoreText: app.scoreText || '',
-                                ratings: app.ratings || 0,
-                                price: app.price || 0,
-                                developer: app.developer || '',
-                                developerEmail: app.developerEmail || '',
-                                developerWebsite: app.developerWebsite || '',
-                                developerAddress: app.developerAddress || '',
-                                privacyPolicy: app.privacyPolicy || '',
-                                genre: app.genre || '',
-                                genreId: app.genreId || '',
-                                category: app.categories ? app.categories.map(c => c.name).join(', ') : '',
-                                appUrl: app.url || '',
-                                updated: updateDate.toISOString().split('T')[0],
-                                country: country
-                            });
-                            
-                            // Save progress periodically
-                            if (collectedApps.length % CONFIG.saveProgressEvery === 0) {
-                                saveProgress(collectedApps);
+                            // Optional: filter by install count
+                            if (installCount > 0 && installCount < CONFIG.maxInstalls) {
+                                matchCount++;
+                                processedAppIds.add(app.appId);
+                                
+                                const updateDate = new Date(app.updated);
+                                
+                                collectedApps.push({
+                                    title: app.title || '',
+                                    appId: app.appId || '',
+                                    installs: app.installs || '',
+                                    installCount: installCount,
+                                    scoreText: app.scoreText || '',
+                                    ratings: app.ratings || 0,
+                                    price: app.price || 0,
+                                    developer: app.developer || '',
+                                    developerEmail: app.developerEmail || '',
+                                    developerWebsite: app.developerWebsite || '',
+                                    developerAddress: app.developerAddress || '',
+                                    privacyPolicy: app.privacyPolicy || '',
+                                    genre: app.genre || '',
+                                    genreId: app.genreId || '',
+                                    category: app.categories ? app.categories.map(c => c.name).join(', ') : '',
+                                    appUrl: app.url || '',
+                                    updated: updateDate.toISOString().split('T')[0],
+                                    country: country
+                                });
                             }
                         }
                     }
                     
-                    console.log(`Found ${matchCount} apps updated on January 1, 2025 in this batch`);
+                    console.log(`Page ${page + 1}: Found ${matchCount} matching apps`);
                     console.log(`Total matching apps found so far: ${collectedApps.length}`);
                     
-                    // Save progress after each batch
-                    saveProgress(collectedApps);
+                    // Save progress after each page
+                    processedPages[progressKey] = page;
+                    saveProgress(collectedApps, processedPages);
                     
-                    // Add delay between batches to avoid rate limits
+                    // Determine if we should continue
+                    if (apps.length < CONFIG.batchSize || reachedOldApps) {
+                        hasMore = false;
+                    }
+                    
+                    page++;
+                    
+                    // Add delay between pages to avoid rate limits
                     await new Promise(resolve => setTimeout(resolve, CONFIG.delayBetweenBatches));
                     
                 } catch (error) {
-                    console.error(`Error processing ${category}/${collection}/${country}:`, error.message);
-                    // Continue with next collection despite errors
+                    console.error(`Error processing ${category}/${country}:`, error.message);
+                    // Stop processing this category on error
+                    break;
                 }
             }
         }
