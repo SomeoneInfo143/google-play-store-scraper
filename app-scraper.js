@@ -10,7 +10,7 @@ startDate.setMonth(endDate.getMonth() - 3); // 3 months ago
 // Configuration options
 const CONFIG = {
     throttle: 2, // Reduced to avoid rate limits
-    batchSize: 2500, // Batch size for controlled scraping
+    batchSize: 250, // Batch size for controlled scraping
     delayBetweenBatches: 15000, // Delay between batches
     maxRetries: 3,
     saveProgressEvery: 50,
